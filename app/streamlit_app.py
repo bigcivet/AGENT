@@ -16,11 +16,12 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import streamlit as st
 
-# 保证无论在哪个目录启动，都能正确导入 src/equipment_agent
+# 保证无论在哪个目录启动，都能正确导入 src/equipment_agent、src/vision_agent 与 app/
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SRC_DIR = PROJECT_ROOT / "src"
 SCRIPTS_DIR = PROJECT_ROOT / "scripts"
-for p in (SRC_DIR, SCRIPTS_DIR):
+APP_DIR = PROJECT_ROOT / "app"
+for p in (SRC_DIR, SCRIPTS_DIR, APP_DIR):
     if str(p) not in sys.path:
         sys.path.insert(0, str(p))
 
@@ -29,14 +30,15 @@ from equipment_agent.agent.tools import EquipmentToolkit
 from equipment_agent.config import load_config
 from equipment_agent.data.loader import XJTUSYDataLoader
 from equipment_agent.models.trainer import ModelBundle, TrainingPipeline
+from vision_ui import render_vision_workbench
 
 # 配置中文字体支持（兼容 Windows 微软雅黑 / 黑体 / Linux 常见字体）
 matplotlib.rcParams["font.sans-serif"] = ["Microsoft YaHei", "SimHei", "DejaVu Sans"]
 matplotlib.rcParams["axes.unicode_minus"] = False
 
 st.set_page_config(
-    page_title="设备运维诊断智能体 · AI 老师傅",
-    page_icon="🛠️",
+    page_title="工业智能体综合工作台 · 设备运维 & 视觉质检",
+    page_icon="🏭",
     layout="wide",
 )
 
@@ -50,16 +52,8 @@ def load_resources(data_dir_str: str, artifact_dir_str: str, sampling_rate: int)
 
 
 def render_sidebar(cfg):
-    st.sidebar.title("⚙️ 系统配置与数据")
-
-    # 1. 大模型连接状态
-    if cfg.has_llm_key:
-        st.sidebar.success(f"大模型模式已启用\n\n模型：`{cfg.openai_model}`")
-    else:
-        st.sidebar.info(
-            "当前为 **本地规则模板模式**\n\n"
-            "如需启用大模型（DeepSeek/通义千问等），请在 `.env` 中配置 `OPENAI_API_KEY`。"
-        )
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("🛠️ 设备运维数据与模型")
 
     data_dir_str = st.sidebar.text_input("XJTU-SY 数据目录", value=str(cfg.data_dir))
     artifact_dir_str = st.sidebar.text_input("模型工件目录", value=str(cfg.artifact_dir))
@@ -67,8 +61,6 @@ def render_sidebar(cfg):
     loader, bundle = load_resources(data_dir_str, artifact_dir_str, cfg.sampling_rate)
 
     # 2. 数据与模型一键准备
-    st.sidebar.markdown("---")
-    st.sidebar.subheader("📦 数据与模型管理")
     st.sidebar.write(f"已扫描轴承数：**{len(loader.list_bearings())}**")
     st.sidebar.write(f"模型状态：{'✅ 已就绪' if bundle is not None else '⚠️ 未训练'}")
 
@@ -395,8 +387,7 @@ def render_report_and_metrics_tab(toolkit: EquipmentToolkit, bundle: ModelBundle
         )
 
 
-def main():
-    cfg = load_config()
+def render_equipment_workbench(cfg):
     st.title("🛠️ 工业设备运维诊断智能体（AI 老师傅）")
     st.caption("基于西交大 XJTU-SY 滚动轴承振动数据 · 时频特征工程 + 孤立森林异常检测 + 随机森林故障分类/RUL预测 + 大模型结构化诊断")
 
@@ -429,6 +420,34 @@ def main():
         render_monitoring_tab(toolkit, loader)
     with tab_report:
         render_report_and_metrics_tab(toolkit, bundle, loader)
+
+
+def main():
+    cfg = load_config()
+    st.sidebar.title("🏭 工业智能体工作台")
+
+    # 共用大模型连接状态展示
+    if cfg.has_llm_key:
+        st.sidebar.success(f"大模型模式已启用\n\n模型：`{cfg.openai_model}`")
+    else:
+        st.sidebar.info(
+            "当前为 **本地规则回退模式**\n\n"
+            "如需启用大模型（DeepSeek/通义千问等），请在 `.env` 中配置 `OPENAI_API_KEY`。"
+        )
+
+    module = st.sidebar.radio(
+        "选择智能体模块",
+        options=[
+            "🔍 视觉质检智能体（NEU-DET）",
+            "🛠️ 设备运维诊断智能体（XJTU-SY）",
+        ],
+        index=0,
+    )
+
+    if module.startswith("🔍"):
+        render_vision_workbench()
+    else:
+        render_equipment_workbench(cfg)
 
 
 if __name__ == "__main__":

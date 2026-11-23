@@ -1,54 +1,66 @@
-# 工业数据分析与挖掘综合实训 — 设备运维诊断智能体（AI 老师傅）
+# 工业数据分析与挖掘综合实训 — 工业智能体综合工作台
 
-本项目是「工业数据分析与挖掘综合实训」智能体开发部分的第一阶段成果：**设备运维诊断智能体**。  
-参考工业界“AI 老师傅”思路，基于西交大 **XJTU-SY 滚动轴承加速寿命试验数据集**，打通了从**振动信号加载 → 时频域特征提取 → 无监督异常检测 → 故障分类与剩余寿命（RUL）预测 → 大模型结构化诊断报告 → 交互式对话界面**的完整闭环，并提供模拟振动数据生成器，保证无真实数据、无 API Key 也能完整跑通全流程。
+本项目是「工业数据分析与挖掘综合实训」的智能体开发完整成果，在同一套统一架构与 Streamlit 工作台下集成了两大核心工业智能体：
+1. **设备运维诊断智能体（`src/equipment_agent`）**：基于西交大 **XJTU-SY 滚动轴承加速寿命试验数据集**，打通「振动信号加载 → 54 维时频特征提取 → Isolation Forest 异常检测 → 随机森林故障分类与 RUL 预测 → 大模型结构化诊断报告 → 对话交互」闭环；
+2. **视觉质检智能体（`src/vision_agent`）**：基于东北大学 **NEU-DET 金属表面缺陷数据集**（6 类表面缺陷），打通「PyTorch ResNet18 迁移学习识别（含可选 YOLO 检测适配）→ SQLite 质量数字孪生记忆库 → 自然语言查库（Tool Calling + 受限只读 SQL）→ 连续缺陷主动预警与本地工艺文档 RAG 溯源 → 交互式质检看板」全流程。
+
+两个智能体共用同一套大模型客户端配置（OpenAI 兼容接口）与 Streamlit 交互工作台，并提供完整的模拟数据与模拟产线流水生成脚本，保证**无真实数据集、无 GPU、无 API Key** 也能完整跑通全流程。
 
 ---
 
-## 一、核心功能与架构
+## 一、项目目录结构
 
 ```text
 AGENT/
 ├── app/
-│   └── streamlit_app.py              # Streamlit 交互式运维工作台（对话诊断 + 波形监测 + 报告导出）
+│   ├── streamlit_app.py                  # 统一 Streamlit 工业智能体工作台入口（侧边栏切换两大智能体）
+│   └── vision_ui.py                      # 视觉质检智能体交互页面（上传检测、看板、对话查询、预警与 RAG）
+├── data/
+│   └── process_docs/                     # 工艺知识库（版本管理，供视觉质检 RAG 溯源引用）
+│       ├── 01_热轧带钢轧制工艺规程.md
+│       ├── 02_金属表面缺陷成因与处置手册.md
+│       ├── 03_轧辊维护与导卫检修作业指导书.md
+│       └── 04_产线质量异常分级预警与应急预案.md
 ├── scripts/
-│   ├── generate_mock_data.py         # 符合 XJTU-SY 目录与格式的模拟振动数据生成脚本
-│   └── train_pipeline.py             # 一键特征提取、模型训练、离线评估与端到端诊断验证脚本
+│   ├── generate_mock_data.py             # 生成 XJTU-SY 模拟振动数据（25.6kHz / 32768点）
+│   ├── train_pipeline.py                 # 设备运维智能体一键训练与端到端诊断验证
+│   ├── generate_mock_neu_det.py          # 生成 NEU-DET 200x200 灰度模拟缺陷图与 PASCAL VOC XML 标注
+│   ├── simulate_inspection_stream.py     # 模拟多台机台、多天质检流水写入 SQLite 并触发主动预警
+│   └── train_vision_pipeline.py          # 视觉质检 ResNet18 一键训练、评估与端到端联调脚本
 ├── src/
-│   └── equipment_agent/              # 设备运维诊断智能体核心包（预留 src/vision_agent/ 扩展位）
-│       ├── config.py                 # 全局配置与环境变量（.env）加载
-│       ├── data/
-│       │   └── loader.py             # XJTU-SY 数据加载器（支持逐文件流式读取、按轴承单元切分）
-│       ├── features/
-│       │   └── extractor.py          # 双通道时域 + FFT 频域特征提取（54 维物理特征）
-│       ├── models/
-│       │   ├── base.py               # 抽象基类（统一接口，方便后续无缝替换为 CNN / LSTM）
-│       │   ├── anomaly.py            # 孤立森林（Isolation Forest）无监督异常检测
-│       │   ├── classifier.py         # 随机森林故障分类基线模型
-│       │   ├── rul.py                # 随机森林 RUL 剩余寿命预测基线模型（Max-based 归一化）
-│       │   └── trainer.py            # 离线训练、评估与 joblib 模型持久化流水线
-│       ├── report/
-│       │   └── generator.py          # 结构化诊断报告生成器（OpenAI 兼容接口 + 规则模板自动降级）
+│   ├── equipment_agent/                  # 【模块一】设备运维诊断智能体（AI 老师傅）
+│   │   ├── config.py                     # 全局配置与 .env 加载（供两个智能体复用）
+│   │   ├── data/loader.py                # XJTU-SY 轴承数据加载器
+│   │   ├── features/extractor.py         # 双通道 54 维时域 + FFT 频域特征提取
+│   │   ├── models/                       # 异常检测(IF)、故障分类(RF)、RUL预测(RF)及 CNN/LSTM 扩展基类
+│   │   ├── report/generator.py           # OpenAI 兼容结构化诊断报告 + 规则模板降级
+│   │   └── agent/                        # 运维诊断工具集与编排器
+│   └── vision_agent/                     # 【模块二】视觉质检智能体（NEU-DET）
+│       ├── config.py                     # 视觉配置（复用大模型配置，定义 6 类缺陷映射与阈值）
+│       ├── llm.py                        # 复用的 OpenAI 兼容大模型客户端工厂
+│       ├── vision/
+│       │   ├── dataset.py                # NEU-DET 目录加载器、VOC XML 解析、数据增强与 YOLO 导出
+│       │   ├── classifier.py             # PyTorch ResNet18 迁移学习分类器与评估（准确率/F1/混淆矩阵）
+│       │   └── yolo_detector.py          # 可选 Ultralytics YOLO 目标检测适配器
+│       ├── memory/
+│       │   └── store.py                  # SQLite 产线质量“数字孪生”记忆库 + 受限只读 SQL 执行器
+│       ├── decision/
+│       │   ├── rag.py                    # 轻量级工艺文档 RAG 检索引擎（TF-IDF 字符 n-gram，零重型依赖）
+│       │   └── alert_engine.py           # 连续同类缺陷主动预警引擎（阈值可配置 + 自动关联工艺原因）
 │       └── agent/
-│           ├── tools.py              # 智能体诊断工具集（OpenAI Function Calling Schema）
-│           └── orchestrator.py       # AI 老师傅编排器（大模型工具调用 + 本地意图路由回退）
-├── tests/                            # pytest 单元测试与端到端集成测试
-├── .env.example                      # 大模型 API 环境变量配置模板
-├── requirements.txt                  # Python 依赖清单
+│           ├── tools.py                  # 视觉质检工具集（统计、机台趋势、对比、预警、RAG、只读 SQL）
+│           └── orchestrator.py           # 自然语言质检推理 Agent（LLM Function Calling + 本地规则回退）
+├── tests/                                # pytest 单元测试与端到端集成测试
+├── .env.example                          # 大模型 API 与路径环境变量模板
+├── requirements.txt                      # Python 依赖清单
 └── README.md
 ```
-
-### 核心技术亮点
-1. **严格对齐 XJTU-SY 数据规范**：支持 25.6 kHz、每文件 32,768 点、双列（`Horizontal_vibration_signals`, `Vertical_vibration_signals`）标准 CSV，内置西交大 15 个轴承工况与失效类型映射，且按“单个轴承单元”切分训练/测试集避免数据泄露。
-2. **完整时频域特征工程**：水平/垂直双通道各提取 11 维时域特征（RMS、峭度、偏度、峰值因子、波形因子、脉冲因子、裕度因子等）与 15 维频域特征（FFT 主频、频谱重心、均方频率、频谱熵及 0-1k / 1-3k / 3-6k / 6-12.8kHz 四频带能量占比）+ 通道间 RMS 比值与相关系数，共 54 维。
-3. **可扩展模型基类**：异常检测采用无监督 `IsolationForest`；故障分类与 RUL 预测默认使用随机森林基线，并通过 `BaseFaultClassifier` / `BaseRULPredictor` 抽象基类预留接口，后续可直接替换为 PyTorch `CNN` / `LSTM` 而无需修改智能体和前端代码。
-4. **双模式智能体与报告生成**：配置 OpenAI 兼容 API（如 DeepSeek、通义千问）时自动启用大模型 Function Calling 与 JSON 结构化报告；未配置 Key 或断网时无缝降级为本地规则路由器与工业机理模板报告，保证实训演示 100% 可用。
 
 ---
 
 ## 二、环境安装
 
-建议使用 Python 3.10 及以上版本（已在 Python 3.12 环境验证通过）。
+建议使用 Python 3.10 及以上版本（已在 Python 3.12 + CPU 环境验证通过）。
 
 ```bash
 # 1. 创建并激活虚拟环境（Windows PowerShell）
@@ -58,99 +70,103 @@ python -m venv .venv
 # Linux / macOS 激活方式：
 # source .venv/bin/activate
 
-# 2. 安装项目依赖（使用清华镜像加速）
+# 2. 若仅使用 CPU 运行 PyTorch，建议先安装轻量 CPU 版 torch/torchvision（可选）
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+
+# 3. 安装项目其余依赖（使用清华镜像加速）
 pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+
+# 4. （可选）如需使用 YOLO 目标检测适配器：
+# pip install ultralytics
 ```
 
 ---
 
-## 三、数据准备（二选一）
+## 三、大模型 API 配置（可选，两个智能体共用）
 
-### 方式 A：快速体验 — 使用模拟振动数据（推荐首次运行）
-没有真实数据集时，可直接运行模拟数据脚本生成与 XJTU-SY 目录、采样率（25.6kHz）及单文件点数（32768）完全一致的轴承全生命周期振动数据：
-
-```bash
-python scripts/generate_mock_data.py --output data/xjtu_sy --files-per-bearing 24 --samples-per-file 32768
-```
-
-### 方式 B：使用真实西交大 XJTU-SY 轴承数据集
-将下载并解压后的真实数据放到 `data/xjtu_sy/` 目录下，保持标准二级目录结构即可自动识别：
-
-```text
-data/xjtu_sy/
-├── 35Hz12kN/
-│   ├── Bearing1_1/
-│   │   ├── 1.csv
-│   │   ├── 2.csv
-│   │   └── ...
-│   └── ...
-├── 37.5Hz11kN/
-│   └── Bearing2_1/ ...
-└── 40Hz10kN/
-    └── Bearing3_1/ ...
-```
-
-> 真实数据集参考下载地址见实训指导书（百度网盘），每个文件默认 1 分钟采样、两列水平/垂直振动信号。
-
----
-
-## 四、大模型 API 配置（可选）
-
-不配置 API Key 也可完整运行（系统会自动使用本地规则路由器与规则模板生成结构化报告）。  
+不配置 API Key 也可完整运行（系统会自动降级为本地规则路由器与模板引擎）。  
 如需接入 DeepSeek、通义千问等 OpenAI 兼容大模型：
 
-1. 复制 `.env.example` 为 `.env`：
-   ```bash
-   copy .env.example .env   # Windows
-   # cp .env.example .env   # Linux / macOS
-   ```
-2. 在 `.env` 中填入密钥与模型名称，例如 DeepSeek：
-   ```ini
-   OPENAI_API_KEY=sk-你的真实密钥
-   OPENAI_BASE_URL=https://api.deepseek.com/v1
-   OPENAI_MODEL=deepseek-chat
-   ```
-   或阿里云通义千问（DashScope 兼容模式）：
-   ```ini
-   OPENAI_API_KEY=sk-你的真实密钥
-   OPENAI_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
-   OPENAI_MODEL=qwen-plus
-   ```
+```bash
+copy .env.example .env   # Windows
+# cp .env.example .env   # Linux / macOS
+```
+
+在 `.env` 中配置密钥与模型名，例如：
+```ini
+OPENAI_API_KEY=sk-你的真实密钥
+OPENAI_BASE_URL=https://api.deepseek.com/v1
+OPENAI_MODEL=deepseek-chat
+```
 
 ---
 
-## 五、运行全流程
+## 四、视觉质检智能体运行指南（NEU-DET）
 
-### 1. 一键训练模型并执行命令行端到端验证
+### 1. 数据准备（二选一）
+
+- **方式 A：快速体验 — 生成模拟 200×200 灰度缺陷图与 VOC XML 标注**
+  ```bash
+  # 默认每类 60 张（共 360 张），如需对齐官方规模可设 --per-class 300
+  python scripts/generate_mock_neu_det.py --output data/neu_det --per-class 60
+  ```
+- **方式 B：放入真实 NEU-DET 数据集**  
+  将真实 NEU-DET 数据解压至 `data/neu_det/`，加载器自动兼容以下任意目录布局：
+  - 标准检测版：`data/neu_det/train/images/<类别>/*.jpg` + `train/annotations/*.xml`（以及 `validation/`）
+  - 扁平检测版：`data/neu_det/IMAGES/*.jpg` + `data/neu_det/ANNOTATIONS/*.xml`
+  - 分类目录版：`data/neu_det/<类别>/*.jpg`（6 类：`crazing`、`inclusion`、`patches`、`pitted_surface`、`rolled-in_scale`、`scratches`）
+
+### 2. 一键训练 ResNet18 分类模型 + 模拟产线流水 + 联调验证
+
 ```bash
-# 若 data/xjtu_sy 为空，附加 --generate-mock 会自动生成模拟数据并完成训练与诊断演示
+# CPU 友好配置：可自由调整 --epochs / --batch-size / --freeze-backbone
+python scripts/train_vision_pipeline.py --generate-mock --simulate-stream --epochs 5 --freeze-backbone
+```
+
+产物说明：
+- `artifacts/vision_models/resnet18_neu_det.pt`：PyTorch ResNet18 缺陷分类权重
+- `artifacts/vision_models/vision_metrics.json`：验证集准确率、Macro-F1、每类指标与 6×6 混淆矩阵
+- `data/vision_memory.db`：SQLite 产线质量数字孪生数据库（含检测流水表 `inspections` 与预警表 `alerts`）
+
+若需单独重新模拟多机台（`M01`~`M04`）、多天检测流水并触发连续缺陷预警：
+```bash
+python scripts/simulate_inspection_stream.py --days 7 --threshold 3
+```
+
+---
+
+## 五、设备运维诊断智能体运行指南（XJTU-SY）
+
+```bash
+# 生成 XJTU-SY 模拟振动数据（或将真实数据集放入 data/xjtu_sy/）并一键训练评估
 python scripts/train_pipeline.py --generate-mock
 ```
-训练完成后，模型文件将保存在 `artifacts/models/`：
-- `isolation_forest.joblib`（无监督异常检测器）
-- `rf_fault_classifier.joblib`（随机森林故障分类器）
-- `rf_rul_predictor.joblib`（随机森林 RUL 预测器）
-- `metrics.json`（离线评估指标报告）
 
-### 2. 启动 Streamlit 交互式运维工作台
+模型工件保存在 `artifacts/models/`（`isolation_forest.joblib`、`rf_fault_classifier.joblib`、`rf_rul_predictor.joblib`、`metrics.json`）。
+
+---
+
+## 六、启动统一 Streamlit 工作台
+
 ```bash
 streamlit run app/streamlit_app.py
 ```
-启动后浏览器访问 `http://localhost:8501`，包含三个核心功能页：
-- **💬 AI 老师傅对话诊断**：模拟“工人提问 → Agent 自主调用诊断工具 → 解释结论与维修建议”，支持展开查看每一步工具调用入参与出参。
-- **📈 实时监测与时频分析**：逐文件流式回放轴承 RMS 退化、Isolation Forest 异常分数、RUL 预测曲线，查看当前分钟时域波形与 FFT 频谱，支持上传单个自定义 CSV 文件即时诊断。
-- **📋 结构化报告与模型评估**：一键生成并导出 Markdown / JSON 格式诊断报告，查看模型离线准确率、Macro-F1、MAE/RMSE/R² 与特征重要性排行。
 
-### 3. 运行自动化测试
-```bash
-pytest -v
-```
+打开浏览器访问 `http://localhost:8501`，在左侧边栏可自由切换两大智能体：
+
+### 1. 🔍 视觉质检智能体（NEU-DET）
+- **📷 图片上传检测**：上传本地金属表面图片或抽取 NEU-DET 样本，实时输出 6 类缺陷概率分布、自动写入 SQLite，若连续同类缺陷达到阈值立即触发主动预警并展示工艺依据。
+- **📊 质量数字孪生看板**：展示缺陷总量 KPI、各类缺陷分布柱状图、各机台按天缺陷趋势曲线、机台横向对比、流水明细表，以及 ResNet18 验证指标与 6×6 混淆矩阵热力图。
+- **💬 质量对话查询**：支持自然语言提问（如“最近哪种缺陷最多？”、“3 号机台有没有异常趋势？”、“压入氧化皮的工艺原因和处置措施是什么？”），支持展开查看工具调用与工艺文档引用轨迹，也支持直接执行受限只读 `SELECT` 查询。
+- **🚨 主动预警与工艺知识库**：支持动态调整连续缺陷预警阈值、一键重扫、预警状态流转（确认/闭环解决），以及直接对 `data/process_docs/` 进行 RAG 关键词检索。
+
+### 2. 🛠️ 设备运维诊断智能体（XJTU-SY）
+- **💬 AI 老师傅对话诊断** / **📈 实时监测与时频分析** / **📋 结构化报告与模型评估**。
 
 ---
 
-## 六、后续扩展说明
+## 七、运行自动化测试
 
-1. **升级深度学习模型（CNN / LSTM）**：
-   在 `src/equipment_agent/models/` 下新建 `cnn_classifier.py` 继承 `BaseFaultClassifier`，新建 `lstm_rul.py` 继承 `BaseRULPredictor`，实现 `fit / predict / evaluate / save / load` 后在 `trainer.py` 中替换即可，无需改动 Agent 和前端代码。
-2. **下一阶段：视觉质检智能体**：
-   可在 `src/vision_agent/` 下平行构建 NEU-DET 表面缺陷检测工具（YOLO/ResNet）、SQLite 质量数字孪生记忆库、自然语言统计查询（Text-to-SQL / Tool Calling）以及基于本地工艺文档的 RAG 根因预警模块，并与当前运维工作台统一集成。
+```bash
+pytest -v
+```
