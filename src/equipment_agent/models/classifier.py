@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from pathlib import Path
+import time
 from typing import Any
 
 import joblib
@@ -65,6 +66,7 @@ class RandomForestFaultClassifier(BaseFaultClassifier):
             ]
         )
         self.classes_: list[str] = []
+        self.train_time_seconds: float = 0.0
         self._fitted: bool = False
 
     def _prepare_matrix(self, x: pd.DataFrame | np.ndarray | dict[str, float]) -> np.ndarray:
@@ -78,11 +80,13 @@ class RandomForestFaultClassifier(BaseFaultClassifier):
     def fit(
         self, x: pd.DataFrame | np.ndarray, y: pd.Series | np.ndarray
     ) -> "RandomForestFaultClassifier":
+        t0 = time.perf_counter()
         mat = self._prepare_matrix(x)
         labels = np.asarray(y, dtype=str)
         self.pipeline.fit(mat, labels)
         clf: RandomForestClassifier = self.pipeline.named_steps["clf"]
         self.classes_ = [str(c) for c in clf.classes_]
+        self.train_time_seconds = round(time.perf_counter() - t0, 4)
         self._fitted = True
         return self
 
@@ -134,9 +138,13 @@ class RandomForestFaultClassifier(BaseFaultClassifier):
         self, x: pd.DataFrame | np.ndarray, y: pd.Series | np.ndarray
     ) -> dict[str, Any]:
         y_true = np.asarray(y, dtype=str)
+        t0 = time.perf_counter()
         y_pred = self.predict(x)
+        infer_sec = time.perf_counter() - t0
+        n_samples = max(1, len(y_true))
         labels = sorted(set(y_true) | set(y_pred))
         return {
+            "model_name": "RandomForestClassifier",
             "accuracy": round(float(accuracy_score(y_true, y_pred)), 4),
             "macro_f1": round(float(f1_score(y_true, y_pred, average="macro", zero_division=0)), 4),
             "labels": labels,
@@ -144,6 +152,9 @@ class RandomForestFaultClassifier(BaseFaultClassifier):
             "report": classification_report(
                 y_true, y_pred, labels=labels, output_dict=True, zero_division=0
             ),
+            "train_time_seconds": round(float(self.train_time_seconds), 4),
+            "infer_time_seconds": round(float(infer_sec), 5),
+            "infer_time_ms_per_sample": round((infer_sec / n_samples) * 1000.0, 4),
         }
 
     def save(self, path: str | Path) -> Path:

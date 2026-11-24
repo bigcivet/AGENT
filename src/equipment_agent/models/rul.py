@@ -202,3 +202,134 @@ class RandomForestRULPredictor(BaseRULPredictor):
         obj.global_avg_life = payload.get("global_avg_life", 120.0)
         obj._fitted = payload["fitted"]
         return obj
+
+
+def compute_group_normalized_rul(
+    df: pd.DataFrame,
+    group_max_life: dict[str, float] | None = None,
+) -> tuple[np.ndarray, dict[str, float]]:
+    """按工况分组最大寿命进行 RUL 归一化：`rul_minutes / max_life(condition)`。
+
+    返回 `(normalized_values, group_max_life_dict)`。
+    """
+    if group_max_life is None:
+        group_max_life = (
+            df.groupby("condition")["total_files"].max().astype(float).to_dict()
+            if not df.empty
+            else {}
+        )
+    fallback_max = max(group_max_life.values()) if group_max_life else 1.0
+    denoms = np.array(
+        [max(float(group_max_life.get(str(c), fallback_max)), 1.0) for c in df["condition"]],
+        dtype=np.float64,
+    )
+    vals = np.clip(df["rul_minutes"].to_numpy(dtype=np.float64) / denoms, 0.0, 1.0)
+    return vals, {str(k): float(v) for k, v in group_max_life.items()}
+
+
+def compare_rul_normalization_strategies(
+    train_df: pd.DataFrame,
+    test_df: pd.DataFrame,
+    feature_columns: list[str] | None = None,
+    n_estimators: int = 200,
+    random_state: int = 42,
+) -> dict[str, Any]:
+    """统一对比三种 RUL 目标归一化策略（对齐语雀《轴承剩余寿命预测归一化》）：
+
+    1. `max_based`：单轴承 Max-based 相对剩余寿命归一化 [0, 1]（推荐）；
+    2. `group_minmax`：按工况组内最大寿命归一化；
+    3. `absolute`：绝对剩余寿命（分钟），同时折算回相对 [0, 1] 尺度进行公平跨策略对比。
+    """
+    cols = list(feature_columns or FEATURE_COLUMNS)
+    cond_avg_life = train_df.groupby("condition")["total_files"].mean().to_dict()
+    global_avg_life = float(train_df["total_files"].mean())
+
+    y_test_rel = test_df["rul_normalized"].to_numpy(dtype=np.float64)
+    y_test_abs = test_df["rul_minutes"].to_numpy(dtype=np.float64)
+    test_totals = np.maximum(test_df["total_files"].to_numpy(dtype=np.float64), 1.0)
+
+    # 策略 1：Max-based 相对剩余寿命归一化 [0, 1]
+    max_model = RandomForestRULPredictor(
+        feature_columns=cols,
+        mode="relative",
+        n_estimators=n_estimators,
+        random_state=random_state,
+    ).fit(
+        train_df,
+        train_df["rul_normalized"],
+        condition_avg_life=cond_avg_life,
+        global_avg_life=global_avg_life,
+    )
+    pred_max_rel = max_model.predict(test_df)
+    pred_max_abs = pred_max_rel * test_totals
+
+    # 策略 2：按工况分组最大寿命归一化
+    y_train_grp, group_max = compute_group_normalized_rul(train_df)
+    y_test_grp, _ = compute_group_normalized_rul(test_df, group_max_life=group_max)
+    grp_model = RandomForestRULPredictor(
+        feature_columns=cols,
+        mode="relative",
+        n_estimators=n_estimators,
+        random_state=random_state,
+    ).fit(
+        train_df,
+        y_train_grp,
+        condition_avg_life=cond_avg_life,
+        global_avg_life=global_avg_life,
+    )
+    pred_grp_raw = grp_model.predict(test_df)
+    # 按对应工况最大寿命还原为分钟，再除以真实总寿命折算到统一 [0,1] 相对尺度对比
+    fallback_max = max(group_max.values()) if group_max else global_avg_life
+    test_group_denoms = np.array(
+        [max(float(group_max.get(str(c), fallback_max)), 1.0) for c in test_df["condition"]],
+        dtype=np.float64,
+    )
+    pred_grp_abs = pred_grp_raw * test_group_denoms
+    pred_grp_rel = np.clip(pred_grp_abs / test_totals, 0.0, 1.0)
+
+    # 策略 3：绝对剩余寿命（分钟）直接回归
+    abs_model = RandomForestRULPredictor(
+        feature_columns=cols,
+        mode="absolute",
+        n_estimators=n_estimators,
+        random_state=random_state,
+    ).fit(
+        train_df,
+        train_df["rul_minutes"],
+        condition_avg_life=cond_avg_life,
+        global_avg_life=global_avg_life,
+    )
+    pred_abs_min = abs_model.predict(test_df)
+    pred_abs_rel = np.clip(pred_abs_min / test_totals, 0.0, 1.0)
+
+    def _reg_metrics(yt: np.ndarray, yp: np.ndarray) -> dict[str, float]:
+        return {
+            "mae": round(float(mean_absolute_error(yt, yp)), 4),
+            "rmse": round(float(np.sqrt(mean_squared_error(yt, yp))), 4),
+            "r2": round(float(r2_score(yt, yp)), 4) if len(yt) > 1 else 0.0,
+        }
+
+    return {
+        "max_based": {
+            "label": "Max-based 相对归一化 [0,1]",
+            "relative_scale": _reg_metrics(y_test_rel, pred_max_rel),
+            "minute_scale": _reg_metrics(y_test_abs, pred_max_abs),
+            "predictions_relative": pred_max_rel.tolist(),
+            "predictions_minutes": pred_max_abs.tolist(),
+        },
+        "group_minmax": {
+            "label": "工况分组归一化",
+            "native_scale": _reg_metrics(y_test_grp, pred_grp_raw),
+            "relative_scale": _reg_metrics(y_test_rel, pred_grp_rel),
+            "minute_scale": _reg_metrics(y_test_abs, pred_grp_abs),
+            "predictions_relative": pred_grp_rel.tolist(),
+            "predictions_minutes": pred_grp_abs.tolist(),
+        },
+        "absolute": {
+            "label": "绝对剩余寿命 (分钟)",
+            "relative_scale": _reg_metrics(y_test_rel, pred_abs_rel),
+            "minute_scale": _reg_metrics(y_test_abs, pred_abs_min),
+            "predictions_relative": pred_abs_rel.tolist(),
+            "predictions_minutes": pred_abs_min.tolist(),
+        },
+    }

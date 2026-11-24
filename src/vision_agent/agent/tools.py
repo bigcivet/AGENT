@@ -12,7 +12,7 @@ from vision_agent.config import VisionConfig, load_vision_config
 from vision_agent.decision.alert_engine import AlertEngine
 from vision_agent.decision.rag import ProcessDocRAG
 from vision_agent.memory.store import InspectionRecord, QualityMemoryStore
-from vision_agent.vision.classifier import ResNet18DefectClassifier
+from vision_agent.vision.classifier import BaseVisionDefectClassifier
 
 
 class VisionToolkit:
@@ -23,7 +23,7 @@ class VisionToolkit:
         store: QualityMemoryStore,
         rag: ProcessDocRAG,
         alert_engine: AlertEngine,
-        classifier: ResNet18DefectClassifier | None = None,
+        classifier: BaseVisionDefectClassifier | None = None,
         config: VisionConfig | None = None,
     ) -> None:
         self.store = store
@@ -31,6 +31,10 @@ class VisionToolkit:
         self.alert_engine = alert_engine
         self.classifier = classifier
         self.config = config or load_vision_config()
+
+    def set_classifier(self, classifier: BaseVisionDefectClassifier | None) -> None:
+        """动态切换视觉质检智能体使用的缺陷分类模型（ResNet18 / EfficientNet-B0）。"""
+        self.classifier = classifier
 
     @staticmethod
     def openai_tool_schemas() -> list[dict[str, Any]]:

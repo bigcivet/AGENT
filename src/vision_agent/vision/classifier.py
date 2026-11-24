@@ -1,12 +1,13 @@
-"""基于 PyTorch ResNet18 迁移学习的金属表面缺陷分类模型。
+"""基于 PyTorch 迁移学习的金属表面缺陷多模型分类模块（ResNet18 / EfficientNet-B0）。
 
 设计要点：
-1. 默认尝试加载 ImageNet 预训练权重进行迁移学习；若离线环境无法下载权重，
-   自动安全回退为随机初始化并继续训练，保证实训环境 100% 可跑通。
-2. 支持 CPU / GPU 自动适配，训练轮数（epochs）、批次大小（batch_size）、
-   是否冻结主干（freeze_backbone）均可配置。
-3. 训练结束后自动输出并保存准确率（Accuracy）、宏平均 F1（Macro-F1）、
-   分类明细及 6x6 混淆矩阵。
+1. 统一封装 `BaseVisionDefectClassifier`，提供 `ResNet18DefectClassifier` 与
+   `EfficientNetB0DefectClassifier` 两个可互换分类模型；
+2. 默认尝试加载 ImageNet 预训练权重；若离线环境或网络受限无法下载权重，
+   自动安全回退为 `weights=None` 随机初始化并继续训练，保证 100% 可跑通；
+3. 支持两划分（train/val）与标准三划分（70% train / 15% val / 15% test），
+   训练后自动统计 Accuracy、Macro-F1、每类 Precision/Recall/F1、6×6 混淆矩阵、
+   训练耗时与单图平均推理耗时（ms）。
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ from __future__ import annotations
 import io
 import json
 import random
+import time
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
@@ -28,7 +30,12 @@ from torch.utils.data import DataLoader
 from torchvision import models
 
 from vision_agent.config import DEFECT_CLASSES, DEFECT_CN_MAP, DEFECT_SEVERITY_MAP
-from vision_agent.vision.dataset import NEUDetCatalog, NEUDetDataset, build_image_transforms
+from vision_agent.vision.dataset import (
+    DefectSample,
+    NEUDetCatalog,
+    NEUDetDataset,
+    build_image_transforms,
+)
 
 
 @dataclass
@@ -64,7 +71,6 @@ def _build_resnet18(num_classes: int, pretrained: bool = True) -> tuple[nn.Modul
             model = models.resnet18(weights=weights)
             used_pretrained = True
         except Exception:
-            # 离线环境下载预训练权重失败时自动降级，避免阻断训练
             model = models.resnet18(weights=None)
     else:
         model = models.resnet18(weights=None)
@@ -77,11 +83,34 @@ def _build_resnet18(num_classes: int, pretrained: bool = True) -> tuple[nn.Modul
     return model, used_pretrained
 
 
-class ResNet18DefectClassifier:
-    """NEU-DET 六类金属表面缺陷 ResNet18 迁移学习分类器。"""
+def _build_efficientnet_b0(num_classes: int, pretrained: bool = True) -> tuple[nn.Module, bool]:
+    """构建 EfficientNet-B0 模型，离线或下载失败时自动回退 `weights=None`。"""
+    used_pretrained = False
+    model: nn.Module
+    if pretrained:
+        try:
+            weights = models.EfficientNet_B0_Weights.DEFAULT
+            model = models.efficientnet_b0(weights=weights)
+            used_pretrained = True
+        except Exception:
+            model = models.efficientnet_b0(weights=None)
+    else:
+        model = models.efficientnet_b0(weights=None)
 
-    MODEL_FILENAME = "resnet18_neu_det.pt"
-    METRICS_FILENAME = "vision_metrics.json"
+    in_features = model.classifier[1].in_features
+    model.classifier = nn.Sequential(
+        nn.Dropout(p=0.2, inplace=True),
+        nn.Linear(in_features, num_classes),
+    )
+    return model, used_pretrained
+
+
+class BaseVisionDefectClassifier:
+    """NEU-DET 六类金属表面缺陷迁移学习分类器共享基类。"""
+
+    ARCH_NAME: str = "resnet18"
+    MODEL_FILENAME: str = "resnet18_neu_det.pt"
+    METRICS_FILENAME: str = "vision_metrics.json"
 
     def __init__(
         self,
@@ -100,12 +129,21 @@ class ResNet18DefectClassifier:
         self._eval_transform = build_image_transforms(image_size=self.image_size, is_train=False)
 
     @classmethod
+    def _build_backbone(cls, num_classes: int, pretrained: bool = True) -> tuple[nn.Module, bool]:
+        raise NotImplementedError
+
+    @classmethod
+    def _apply_freeze_backbone(cls, model: nn.Module) -> None:
+        """冻结主干浅层参数，仅保留高层语义块与分类头可训练。"""
+        raise NotImplementedError
+
+    @classmethod
     def exists(cls, artifact_dir: str | Path) -> bool:
         return (Path(artifact_dir) / cls.MODEL_FILENAME).exists()
 
     def fit(
         self,
-        catalog: NEUDetCatalog,
+        catalog: NEUDetCatalog | None = None,
         epochs: int = 5,
         batch_size: int = 16,
         lr: float = 1e-3,
@@ -113,13 +151,39 @@ class ResNet18DefectClassifier:
         pretrained: bool = True,
         freeze_backbone: bool = False,
         seed: int = 42,
+        split_mode: str = "two_way",
+        train_ratio: float = 0.70,
+        test_ratio: float = 0.15,
+        custom_splits: tuple[list[DefectSample], list[DefectSample], list[DefectSample] | None] | None = None,
     ) -> dict[str, Any]:
-        """在 NEU-DET 数据集上执行迁移学习训练并返回完整评估指标。"""
-        if not catalog.is_available:
-            raise ValueError(f"未在目录 {catalog.data_dir} 扫描到有效的 NEU-DET 图像样本。")
+        """执行训练与评估并返回完整指标字典。
 
+        Args:
+            catalog: NEU-DET 目录管理器（当 `custom_splits` 为 None 时必填）。
+            split_mode: `"two_way"`（兼容旧版 train/val）或 `"three_way"`（70%/15%/15%）。
+            custom_splits: 显式传入 `(train_samples, val_samples, test_samples)`，确保多模型在完全相同数据划分上对比。
+        """
         _set_seed(seed)
-        train_samples, val_samples = catalog.split_samples(val_ratio=val_ratio, seed=seed)
+
+        if custom_splits is not None:
+            train_samples, val_samples, test_samples = custom_splits
+            effective_split_mode = "three_way" if test_samples is not None else "two_way"
+        else:
+            if catalog is None or not catalog.is_available:
+                raise ValueError("未扫描到有效的 NEU-DET 图像样本，无法训练视觉模型。")
+            if split_mode == "three_way":
+                effective_val_ratio = round(1.0 - train_ratio - test_ratio, 6)
+                train_samples, val_samples, test_samples = catalog.split_train_val_test(
+                    train_ratio=train_ratio,
+                    val_ratio=effective_val_ratio,
+                    test_ratio=test_ratio,
+                    seed=seed,
+                )
+                effective_split_mode = "three_way"
+            else:
+                train_samples, val_samples = catalog.split_samples(val_ratio=val_ratio, seed=seed)
+                test_samples = None
+                effective_split_mode = "two_way"
 
         train_ds = NEUDetDataset(
             train_samples,
@@ -129,24 +193,37 @@ class ResNet18DefectClassifier:
             val_samples,
             transform=build_image_transforms(image_size=self.image_size, is_train=False),
         )
+        test_ds = (
+            NEUDetDataset(
+                test_samples,
+                transform=build_image_transforms(image_size=self.image_size, is_train=False),
+            )
+            if test_samples is not None
+            else None
+        )
 
         train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=0)
         val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=0)
+        test_loader = (
+            DataLoader(test_ds, batch_size=batch_size, shuffle=False, num_workers=0)
+            if test_ds is not None
+            else None
+        )
 
-        model, used_pretrained = _build_resnet18(
+        model, used_pretrained = self._build_backbone(
             num_classes=len(self.classes), pretrained=pretrained
         )
         self.used_pretrained = used_pretrained
 
-        # 若选择冻结主干，仅训练最后的 layer4 + fc（在 CPU 上兼顾速度与精度）
         if freeze_backbone and used_pretrained:
-            for name, param in model.named_parameters():
-                if not (name.startswith("fc.") or name.startswith("layer4.")):
-                    param.requires_grad = False
+            self._apply_freeze_backbone(model)
 
         model.to(self.device)
         criterion = nn.CrossEntropyLoss()
         trainable_params = [p for p in model.parameters() if p.requires_grad]
+        total_param_count = int(sum(p.numel() for p in model.parameters()))
+        trainable_param_count = int(sum(p.numel() for p in trainable_params))
+
         optimizer = torch.optim.AdamW(trainable_params, lr=lr, weight_decay=1e-4)
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max(1, epochs))
 
@@ -154,6 +231,7 @@ class ResNet18DefectClassifier:
         best_val_acc = -1.0
         best_state: dict[str, torch.Tensor] | None = None
 
+        train_t0 = time.perf_counter()
         for epoch in range(1, epochs + 1):
             model.train()
             running_loss = 0.0
@@ -195,12 +273,22 @@ class ResNet18DefectClassifier:
                 best_val_acc = val_eval["accuracy"]
                 best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
 
+        train_elapsed = time.perf_counter() - train_t0
+
         if best_state is not None:
             model.load_state_dict(best_state)
         self.model = model
         self.model.eval()
 
-        final_eval = self._evaluate_loader(self.model, val_loader, criterion)
+        # 若存在独立测试集则在测试集上给出最终指标，否则在验证集上评估
+        eval_loader = test_loader if test_loader is not None else val_loader
+        eval_split_name = "test" if test_loader is not None else "validation"
+
+        infer_t0 = time.perf_counter()
+        final_eval = self._evaluate_loader(self.model, eval_loader, criterion)
+        infer_elapsed = time.perf_counter() - infer_t0
+        n_eval = max(1, len(final_eval["y_true"]))
+
         y_true = final_eval["y_true"]
         y_pred = final_eval["y_pred"]
 
@@ -216,19 +304,28 @@ class ResNet18DefectClassifier:
 
         self.metrics = {
             "trained_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "model_name": "resnet18",
+            "model_name": self.ARCH_NAME,
             "device": str(self.device),
+            "split_mode": effective_split_mode,
+            "eval_split": eval_split_name,
             "pretrained_weights_used": used_pretrained,
             "freeze_backbone": freeze_backbone,
             "image_size": self.image_size,
             "epochs": epochs,
             "batch_size": batch_size,
             "lr": lr,
+            "total_params": total_param_count,
+            "trainable_params": trainable_param_count,
             "train_samples": len(train_samples),
             "val_samples": len(val_samples),
+            "test_samples": len(test_samples) if test_samples is not None else 0,
+            "best_val_accuracy": round(float(max(best_val_acc, 0.0)), 4),
             "classes": list(self.classes),
             "accuracy": round(float(accuracy_score(y_true, y_pred)), 4),
             "macro_f1": round(float(f1_score(y_true, y_pred, average="macro", zero_division=0)), 4),
+            "train_time_seconds": round(float(train_elapsed), 3),
+            "eval_infer_time_seconds": round(float(infer_elapsed), 4),
+            "avg_infer_time_ms": round((infer_elapsed / n_eval) * 1000.0, 3),
             "confusion_matrix": cm.tolist(),
             "per_class_metrics": {
                 cls: {
@@ -287,6 +384,7 @@ class ResNet18DefectClassifier:
         ckpt_path = out_dir / self.MODEL_FILENAME
         torch.save(
             {
+                "arch_name": self.ARCH_NAME,
                 "state_dict": self.model.cpu().state_dict(),
                 "classes": list(self.classes),
                 "image_size": self.image_size,
@@ -294,7 +392,6 @@ class ResNet18DefectClassifier:
             },
             ckpt_path,
         )
-        # 恢复到推理设备
         self.model.to(self.device)
 
         metrics_path = out_dir / self.METRICS_FILENAME
@@ -308,8 +405,8 @@ class ResNet18DefectClassifier:
         cls,
         artifact_dir: str | Path,
         device: str | None = None,
-    ) -> "ResNet18DefectClassifier":
-        """从磁盘加载已训练的 ResNet18 缺陷分类器与评估指标。"""
+    ) -> "BaseVisionDefectClassifier":
+        """从磁盘加载已训练的视觉缺陷分类器与评估指标。"""
         art_dir = Path(artifact_dir)
         ckpt_path = art_dir / cls.MODEL_FILENAME
         if not ckpt_path.exists():
@@ -320,7 +417,7 @@ class ResNet18DefectClassifier:
         image_size = int(checkpoint.get("image_size", 224))
 
         instance = cls(classes=classes, image_size=image_size, device=device)
-        model, _ = _build_resnet18(num_classes=len(classes), pretrained=False)
+        model, _ = cls._build_backbone(num_classes=len(classes), pretrained=False)
         model.load_state_dict(checkpoint["state_dict"])
         model.to(instance.device)
         model.eval()
@@ -369,5 +466,89 @@ class ResNet18DefectClassifier:
             confidence=round(confidence, 4),
             severity=DEFECT_SEVERITY_MAP.get(defect_type, "中"),
             probabilities=prob_dict,
-            model_name="resnet18",
+            model_name=self.ARCH_NAME,
         )
+
+
+class ResNet18DefectClassifier(BaseVisionDefectClassifier):
+    """NEU-DET 六类金属表面缺陷 ResNet18 迁移学习分类器。"""
+
+    ARCH_NAME = "resnet18"
+    MODEL_FILENAME = "resnet18_neu_det.pt"
+    METRICS_FILENAME = "vision_metrics.json"
+
+    @classmethod
+    def _build_backbone(cls, num_classes: int, pretrained: bool = True) -> tuple[nn.Module, bool]:
+        return _build_resnet18(num_classes=num_classes, pretrained=pretrained)
+
+    @classmethod
+    def _apply_freeze_backbone(cls, model: nn.Module) -> None:
+        for name, param in model.named_parameters():
+            if not (name.startswith("fc.") or name.startswith("layer4.")):
+                param.requires_grad = False
+
+
+class EfficientNetB0DefectClassifier(BaseVisionDefectClassifier):
+    """NEU-DET 六类金属表面缺陷 EfficientNet-B0 轻量高效分类器。"""
+
+    ARCH_NAME = "efficientnet_b0"
+    MODEL_FILENAME = "efficientnet_b0_neu_det.pt"
+    METRICS_FILENAME = "efficientnet_b0_metrics.json"
+
+    @classmethod
+    def _build_backbone(cls, num_classes: int, pretrained: bool = True) -> tuple[nn.Module, bool]:
+        return _build_efficientnet_b0(num_classes=num_classes, pretrained=pretrained)
+
+    @classmethod
+    def _apply_freeze_backbone(cls, model: nn.Module) -> None:
+        for name, param in model.named_parameters():
+            if not (
+                name.startswith("classifier.")
+                or name.startswith("features.7.")
+                or name.startswith("features.8.")
+            ):
+                param.requires_grad = False
+
+
+VISION_MODEL_REGISTRY: dict[str, type[BaseVisionDefectClassifier]] = {
+    "resnet18": ResNet18DefectClassifier,
+    "efficientnet_b0": EfficientNetB0DefectClassifier,
+}
+
+VISION_MODEL_LABELS: dict[str, str] = {
+    "resnet18": "ResNet18",
+    "efficientnet_b0": "EfficientNet-B0",
+}
+
+
+def list_available_vision_models(artifact_dir: str | Path) -> list[str]:
+    """扫描视觉模型目录下已训练就绪的模型标识列表。"""
+    return [name for name, cls in VISION_MODEL_REGISTRY.items() if cls.exists(artifact_dir)]
+
+
+def create_vision_classifier(
+    model_name: str,
+    image_size: int = 224,
+    device: str | None = None,
+) -> BaseVisionDefectClassifier:
+    """按模型名实例化未训练的视觉分类器。"""
+    key = model_name.strip().lower()
+    if key not in VISION_MODEL_REGISTRY:
+        raise ValueError(
+            f"不支持的视觉分类模型：{model_name}，可选：{list(VISION_MODEL_REGISTRY.keys())}"
+        )
+    return VISION_MODEL_REGISTRY[key](image_size=image_size, device=device)
+
+
+def load_vision_classifier(
+    model_name: str,
+    artifact_dir: str | Path,
+    device: str | None = None,
+) -> BaseVisionDefectClassifier:
+    """按模型名从磁盘加载对应视觉分类器。"""
+    key = model_name.strip().lower()
+    if key not in VISION_MODEL_REGISTRY:
+        raise ValueError(
+            f"不支持的视觉分类模型：{model_name}，可选：{list(VISION_MODEL_REGISTRY.keys())}"
+        )
+    return VISION_MODEL_REGISTRY[key].load(artifact_dir=artifact_dir, device=device)

@@ -1,0 +1,356 @@
+{
+  "generated_at": "2026-11-24 10:48:21",
+  "data_dir": "C:\\Users\\bigci\\Desktop\\DEMO\\AGENT\\data\\neu_det",
+  "config": {
+    "epochs": 5,
+    "batch_size": 16,
+    "lr": 0.001,
+    "image_size": 224,
+    "pretrained_requested": true,
+    "freeze_backbone": true,
+    "seed": 42
+  },
+  "split_summary": {
+    "ratios": [
+      0.7,
+      0.15,
+      0.15
+    ],
+    "total_images": 360,
+    "train_images": 252,
+    "val_images": 54,
+    "test_images": 54
+  },
+  "models": {
+    "resnet18": {
+      "trained_at": "2026-11-24 10:47:30",
+      "model_name": "resnet18",
+      "device": "cpu",
+      "split_mode": "three_way",
+      "eval_split": "test",
+      "pretrained_weights_used": true,
+      "freeze_backbone": true,
+      "image_size": 224,
+      "epochs": 5,
+      "batch_size": 16,
+      "lr": 0.001,
+      "total_params": 11179590,
+      "trainable_params": 8396806,
+      "train_samples": 252,
+      "val_samples": 54,
+      "test_samples": 54,
+      "best_val_accuracy": 1.0,
+      "classes": [
+        "crazing",
+        "inclusion",
+        "patches",
+        "pitted_surface",
+        "rolled-in_scale",
+        "scratches"
+      ],
+      "accuracy": 1.0,
+      "macro_f1": 1.0,
+      "train_time_seconds": 56.607,
+      "eval_infer_time_seconds": 1.9795,
+      "avg_infer_time_ms": 36.657,
+      "confusion_matrix": [
+        [
+          9,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          9,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          9,
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          0,
+          9,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          0,
+          0,
+          9,
+          0
+        ],
+        [
+          0,
+          0,
+          0,
+          0,
+          0,
+          9
+        ]
+      ],
+      "per_class_metrics": {
+        "crazing": {
+          "cn_name": "裂纹",
+          "precision": 1.0,
+          "recall": 1.0,
+          "f1_score": 1.0,
+          "support": 9
+        },
+        "inclusion": {
+          "cn_name": "夹杂",
+          "precision": 1.0,
+          "recall": 1.0,
+          "f1_score": 1.0,
+          "support": 9
+        },
+        "patches": {
+          "cn_name": "斑块",
+          "precision": 1.0,
+          "recall": 1.0,
+          "f1_score": 1.0,
+          "support": 9
+        },
+        "pitted_surface": {
+          "cn_name": "麻点",
+          "precision": 1.0,
+          "recall": 1.0,
+          "f1_score": 1.0,
+          "support": 9
+        },
+        "rolled-in_scale": {
+          "cn_name": "压入氧化皮",
+          "precision": 1.0,
+          "recall": 1.0,
+          "f1_score": 1.0,
+          "support": 9
+        },
+        "scratches": {
+          "cn_name": "划痕",
+          "precision": 1.0,
+          "recall": 1.0,
+          "f1_score": 1.0,
+          "support": 9
+        }
+      },
+      "history": [
+        {
+          "epoch": 1,
+          "train_loss": 0.2401,
+          "train_acc": 0.9167,
+          "val_loss": 0.3786,
+          "val_acc": 0.9074
+        },
+        {
+          "epoch": 2,
+          "train_loss": 0.0502,
+          "train_acc": 0.9841,
+          "val_loss": 0.0156,
+          "val_acc": 1.0
+        },
+        {
+          "epoch": 3,
+          "train_loss": 0.027,
+          "train_acc": 0.996,
+          "val_loss": 0.0177,
+          "val_acc": 0.9815
+        },
+        {
+          "epoch": 4,
+          "train_loss": 0.0205,
+          "train_acc": 0.996,
+          "val_loss": 0.0022,
+          "val_acc": 1.0
+        },
+        {
+          "epoch": 5,
+          "train_loss": 0.0267,
+          "train_acc": 0.9881,
+          "val_loss": 0.0007,
+          "val_acc": 1.0
+        }
+      ]
+    },
+    "efficientnet_b0": {
+      "trained_at": "2026-11-24 10:48:19",
+      "model_name": "efficientnet_b0",
+      "device": "cpu",
+      "split_mode": "three_way",
+      "eval_split": "test",
+      "pretrained_weights_used": true,
+      "freeze_backbone": true,
+      "image_size": 224,
+      "epochs": 5,
+      "batch_size": 16,
+      "lr": 0.001,
+      "total_params": 4015234,
+      "trainable_params": 1137078,
+      "train_samples": 252,
+      "val_samples": 54,
+      "test_samples": 54,
+      "best_val_accuracy": 1.0,
+      "classes": [
+        "crazing",
+        "inclusion",
+        "patches",
+        "pitted_surface",
+        "rolled-in_scale",
+        "scratches"
+      ],
+      "accuracy": 1.0,
+      "macro_f1": 1.0,
+      "train_time_seconds": 41.731,
+      "eval_infer_time_seconds": 1.0499,
+      "avg_infer_time_ms": 19.443,
+      "confusion_matrix": [
+        [
+          9,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          9,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          9,
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          0,
+          9,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          0,
+          0,
+          9,
+          0
+        ],
+        [
+          0,
+          0,
+          0,
+          0,
+          0,
+          9
+        ]
+      ],
+      "per_class_metrics": {
+        "crazing": {
+          "cn_name": "裂纹",
+          "precision": 1.0,
+          "recall": 1.0,
+          "f1_score": 1.0,
+          "support": 9
+        },
+        "inclusion": {
+          "cn_name": "夹杂",
+          "precision": 1.0,
+          "recall": 1.0,
+          "f1_score": 1.0,
+          "support": 9
+        },
+        "patches": {
+          "cn_name": "斑块",
+          "precision": 1.0,
+          "recall": 1.0,
+          "f1_score": 1.0,
+          "support": 9
+        },
+        "pitted_surface": {
+          "cn_name": "麻点",
+          "precision": 1.0,
+          "recall": 1.0,
+          "f1_score": 1.0,
+          "support": 9
+        },
+        "rolled-in_scale": {
+          "cn_name": "压入氧化皮",
+          "precision": 1.0,
+          "recall": 1.0,
+          "f1_score": 1.0,
+          "support": 9
+        },
+        "scratches": {
+          "cn_name": "划痕",
+          "precision": 1.0,
+          "recall": 1.0,
+          "f1_score": 1.0,
+          "support": 9
+        }
+      },
+      "history": [
+        {
+          "epoch": 1,
+          "train_loss": 0.7183,
+          "train_acc": 0.8254,
+          "val_loss": 0.0037,
+          "val_acc": 1.0
+        },
+        {
+          "epoch": 2,
+          "train_loss": 0.0511,
+          "train_acc": 0.996,
+          "val_loss": 0.0021,
+          "val_acc": 1.0
+        },
+        {
+          "epoch": 3,
+          "train_loss": 0.0304,
+          "train_acc": 0.996,
+          "val_loss": 0.0006,
+          "val_acc": 1.0
+        },
+        {
+          "epoch": 4,
+          "train_loss": 0.024,
+          "train_acc": 0.996,
+          "val_loss": 0.0007,
+          "val_acc": 1.0
+        },
+        {
+          "epoch": 5,
+          "train_loss": 0.024,
+          "train_acc": 0.9921,
+          "val_loss": 0.0006,
+          "val_acc": 1.0
+        }
+      ]
+    }
+  },
+  "figures": {
+    "model_comparison": "neu_model_comparison.png",
+    "confusion_matrices": "neu_confusion_matrices.png"
+  }
+}

@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -18,24 +18,60 @@ import pandas as pd
 from equipment_agent.data.loader import XJTUSYDataLoader
 from equipment_agent.features.extractor import FEATURE_COLUMNS, build_feature_dataset
 from equipment_agent.models.anomaly import IsolationForestDetector
+from equipment_agent.models.base import BaseFaultClassifier
 from equipment_agent.models.classifier import RandomForestFaultClassifier
+from equipment_agent.models.deep_classifiers import (
+    CNN1DFaultClassifier,
+    FAULT_CLASSIFIER_FILES,
+    LSTMFaultClassifier,
+)
 from equipment_agent.models.rul import RandomForestRULPredictor
 
 
 ANOMALY_MODEL_FILE = "isolation_forest.joblib"
 CLASSIFIER_MODEL_FILE = "rf_fault_classifier.joblib"
+CNN1D_CLASSIFIER_FILE = FAULT_CLASSIFIER_FILES["cnn1d"]
+LSTM_CLASSIFIER_FILE = FAULT_CLASSIFIER_FILES["lstm"]
 RUL_MODEL_FILE = "rf_rul_predictor.joblib"
 METRICS_FILE = "metrics.json"
 
 
 @dataclass
 class ModelBundle:
-    """已加载的完整诊断模型集合。"""
+    """已加载的完整诊断模型集合（支持在 RF / 1D-CNN / LSTM 故障分类器间动态切换）。"""
 
     anomaly_detector: IsolationForestDetector
-    fault_classifier: RandomForestFaultClassifier
+    fault_classifier: BaseFaultClassifier
     rul_predictor: RandomForestRULPredictor
     metrics: dict[str, Any]
+    classifiers: dict[str, BaseFaultClassifier] = field(default_factory=dict)
+    active_classifier_key: str = "rf"
+
+    def __post_init__(self) -> None:
+        if not self.classifiers:
+            self.classifiers = {self.active_classifier_key: self.fault_classifier}
+        elif self.active_classifier_key not in self.classifiers:
+            self.classifiers[self.active_classifier_key] = self.fault_classifier
+
+    def available_classifiers(self) -> list[str]:
+        """返回当前模型束中已加载可用的故障分类器键列表（按 rf/cnn1d/lstm 顺序）。"""
+        order = ("rf", "cnn1d", "lstm")
+        keys = [k for k in order if k in self.classifiers]
+        for k in self.classifiers:
+            if k not in keys:
+                keys.append(k)
+        return keys
+
+    def set_active_classifier(self, model_key: str) -> BaseFaultClassifier:
+        """动态切换当前激活的故障分类模型（`rf` / `cnn1d` / `lstm`）。"""
+        key = model_key.strip().lower()
+        if key not in self.classifiers:
+            raise KeyError(
+                f"故障分类模型 `{model_key}` 尚未加载，当前可用：{self.available_classifiers()}"
+            )
+        self.active_classifier_key = key
+        self.fault_classifier = self.classifiers[key]
+        return self.fault_classifier
 
     @classmethod
     def exists(cls, artifact_dir: str | Path) -> bool:
@@ -46,7 +82,7 @@ class ModelBundle:
         )
 
     @classmethod
-    def load(cls, artifact_dir: str | Path) -> "ModelBundle":
+    def load(cls, artifact_dir: str | Path, active_classifier: str = "rf") -> "ModelBundle":
         root = Path(artifact_dir)
         if not cls.exists(root):
             raise FileNotFoundError(
@@ -58,18 +94,41 @@ class ModelBundle:
             if metrics_path.exists()
             else {}
         )
+        rf_clf = RandomForestFaultClassifier.load(root / CLASSIFIER_MODEL_FILE)
+        classifiers: dict[str, BaseFaultClassifier] = {"rf": rf_clf}
+
+        cnn_path = root / CNN1D_CLASSIFIER_FILE
+        if cnn_path.exists():
+            classifiers["cnn1d"] = CNN1DFaultClassifier.load(cnn_path)
+
+        lstm_path = root / LSTM_CLASSIFIER_FILE
+        if lstm_path.exists():
+            classifiers["lstm"] = LSTMFaultClassifier.load(lstm_path)
+
+        chosen_key = active_classifier.strip().lower()
+        if chosen_key not in classifiers:
+            chosen_key = "rf"
+
         return cls(
             anomaly_detector=IsolationForestDetector.load(root / ANOMALY_MODEL_FILE),
-            fault_classifier=RandomForestFaultClassifier.load(root / CLASSIFIER_MODEL_FILE),
+            fault_classifier=classifiers[chosen_key],
             rul_predictor=RandomForestRULPredictor.load(root / RUL_MODEL_FILE),
             metrics=metrics,
+            classifiers=classifiers,
+            active_classifier_key=chosen_key,
         )
 
     def save(self, artifact_dir: str | Path) -> Path:
         root = Path(artifact_dir)
         root.mkdir(parents=True, exist_ok=True)
         self.anomaly_detector.save(root / ANOMALY_MODEL_FILE)
-        self.fault_classifier.save(root / CLASSIFIER_MODEL_FILE)
+        # 保存全部已训练的故障分类模型（RF / 1D-CNN / LSTM）
+        rf_model = self.classifiers.get("rf", self.fault_classifier)
+        rf_model.save(root / CLASSIFIER_MODEL_FILE)
+        if "cnn1d" in self.classifiers:
+            self.classifiers["cnn1d"].save(root / CNN1D_CLASSIFIER_FILE)
+        if "lstm" in self.classifiers:
+            self.classifiers["lstm"].save(root / LSTM_CLASSIFIER_FILE)
         self.rul_predictor.save(root / RUL_MODEL_FILE)
         (root / METRICS_FILE).write_text(
             json.dumps(self.metrics, ensure_ascii=False, indent=2),
@@ -90,6 +149,9 @@ class TrainingPipeline:
         test_ratio: float = 0.30,
         step: int = 1,
         random_state: int = 42,
+        train_deep_models: bool = False,
+        deep_epochs: int = 35,
+        deep_batch_size: int = 32,
     ) -> None:
         self.loader = loader
         self.artifact_dir = Path(artifact_dir)
@@ -98,6 +160,9 @@ class TrainingPipeline:
         self.test_ratio = test_ratio
         self.step = step
         self.random_state = random_state
+        self.train_deep_models = train_deep_models
+        self.deep_epochs = deep_epochs
+        self.deep_batch_size = deep_batch_size
 
     def run(self) -> ModelBundle:
         """执行完整训练流程并保存模型与评估报告。"""
@@ -161,6 +226,8 @@ class TrainingPipeline:
             random_state=self.random_state,
         ).fit(clf_train_all, clf_train_all["fault_type"])
 
+        classifiers: dict[str, BaseFaultClassifier] = {"rf": fault_classifier}
+
         # 故障分类测试评估（聚焦退化阶段的中后期样本，与课程实训思路一致）
         if not test_df.empty:
             clf_test_df = test_df[
@@ -170,7 +237,28 @@ class TrainingPipeline:
                 clf_test_df = test_df
             clf_metrics = fault_classifier.evaluate(clf_test_df, clf_test_df["fault_type"])
         else:
+            clf_test_df = clf_train_all
             clf_metrics = fault_classifier.evaluate(clf_train_all, clf_train_all["fault_type"])
+
+        deep_clf_metrics: dict[str, Any] = {}
+        if self.train_deep_models:
+            cnn_clf = CNN1DFaultClassifier(
+                feature_columns=FEATURE_COLUMNS,
+                epochs=self.deep_epochs,
+                batch_size=self.deep_batch_size,
+                random_state=self.random_state,
+            ).fit(clf_train_all, clf_train_all["fault_type"])
+            classifiers["cnn1d"] = cnn_clf
+            deep_clf_metrics["cnn1d"] = cnn_clf.evaluate(clf_test_df, clf_test_df["fault_type"])
+
+            lstm_clf = LSTMFaultClassifier(
+                feature_columns=FEATURE_COLUMNS,
+                epochs=self.deep_epochs,
+                batch_size=self.deep_batch_size,
+                random_state=self.random_state,
+            ).fit(clf_train_all, clf_train_all["fault_type"])
+            classifiers["lstm"] = lstm_clf
+            deep_clf_metrics["lstm"] = lstm_clf.evaluate(clf_test_df, clf_test_df["fault_type"])
 
         # 3. 训练 RUL 剩余寿命预测模型（采用 Max-based 归一化相对寿命，并记录工况参考平均寿命）
         cond_avg_life = (
@@ -217,11 +305,16 @@ class TrainingPipeline:
             "rul_prediction": rul_metrics,
         }
 
+        if deep_clf_metrics:
+            metrics["deep_fault_classifiers"] = deep_clf_metrics
+
         bundle = ModelBundle(
             anomaly_detector=anomaly_detector,
             fault_classifier=fault_classifier,
             rul_predictor=rul_predictor,
             metrics=metrics,
+            classifiers=classifiers,
+            active_classifier_key="rf",
         )
         bundle.save(self.artifact_dir)
         return bundle

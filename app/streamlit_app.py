@@ -29,7 +29,9 @@ from equipment_agent.agent.orchestrator import EquipmentDiagnosisAgent
 from equipment_agent.agent.tools import EquipmentToolkit
 from equipment_agent.config import load_config
 from equipment_agent.data.loader import XJTUSYDataLoader
+from equipment_agent.models.deep_classifiers import FAULT_CLASSIFIER_LABELS
 from equipment_agent.models.trainer import ModelBundle, TrainingPipeline
+from benchmark_ui import render_benchmark_workbench
 from vision_ui import render_vision_workbench
 
 # 配置中文字体支持（兼容 Windows 微软雅黑 / 黑体 / Linux 常见字体）
@@ -64,6 +66,26 @@ def render_sidebar(cfg):
     st.sidebar.write(f"已扫描轴承数：**{len(loader.list_bearings())}**")
     st.sidebar.write(f"模型状态：{'✅ 已就绪' if bundle is not None else '⚠️ 未训练'}")
 
+    selected_clf_key = "rf"
+    if bundle is not None:
+        avail_keys = bundle.available_classifiers()
+        selected_clf_key = st.sidebar.selectbox(
+            "故障分类模型切换（RF / 1D-CNN / LSTM）",
+            options=avail_keys,
+            format_func=lambda k: FAULT_CLASSIFIER_LABELS.get(k, k),
+            index=0,
+        )
+        bundle.set_active_classifier(selected_clf_key)
+        st.sidebar.caption(
+            f"已就绪分类器：{', '.join(FAULT_CLASSIFIER_LABELS.get(k, k) for k in avail_keys)}"
+        )
+
+    train_deep_opt = st.sidebar.checkbox(
+        "训练时同步包含 1D-CNN 与 LSTM",
+        value=True,
+        help="开启后点击“一键训练模型”将同时训练 RF / 1D-CNN / LSTM 三个分类器，便于实时切换对比。",
+    )
+
     col1, col2 = st.sidebar.columns(2)
     with col1:
         if st.button("生成模拟数据", use_container_width=True):
@@ -82,7 +104,11 @@ def render_sidebar(cfg):
     with col2:
         if st.button("一键训练模型", use_container_width=True, disabled=not loader.is_available):
             with st.spinner("正在提取时频特征并训练异常检测/故障分类/RUL模型..."):
-                pipeline = TrainingPipeline(loader=loader, artifact_dir=artifact_dir_str)
+                pipeline = TrainingPipeline(
+                    loader=loader,
+                    artifact_dir=artifact_dir_str,
+                    train_deep_models=train_deep_opt,
+                )
                 pipeline.run()
             st.cache_resource.clear()
             st.rerun()
@@ -205,7 +231,11 @@ def render_monitoring_tab(toolkit: EquipmentToolkit, loader: XJTUSYDataLoader):
 
     k1, k2, k3, k4 = st.columns(4)
     k1.metric("异常检测状态", "⚠️ 异常" if anom["is_anomaly"] else "✅ 正常", f"健康度 {anom['health_index']:.1f}/100")
-    k2.metric("疑似故障类型", clf["fault_type"], f"置信度 {clf['confidence']*100:.1f}%")
+    k2.metric(
+        "疑似故障类型",
+        clf["fault_type"],
+        f"置信度 {clf['confidence']*100:.1f}% · {clf.get('model_name', 'RF')}",
+    )
     k3.metric("预测剩余寿命比例", f"{rul['rul_ratio']*100:.1f}%", f"约 {rul['estimated_rul_minutes']:.1f} 分钟")
     k4.metric("水平 RMS / 峭度", f"{anom['key_features']['h_rms']:.3f}", f"峭度 {anom['key_features']['h_kurtosis']:.2f}")
 
@@ -436,18 +466,22 @@ def main():
         )
 
     module = st.sidebar.radio(
-        "选择智能体模块",
+        "选择工作台页面",
         options=[
             "🔍 视觉质检智能体（NEU-DET）",
             "🛠️ 设备运维诊断智能体（XJTU-SY）",
+            "📊 数据分析与模型对比",
         ],
         index=0,
+        key="workbench_page_selector",
     )
 
     if module.startswith("🔍"):
         render_vision_workbench()
-    else:
+    elif module.startswith("🛠️"):
         render_equipment_workbench(cfg)
+    else:
+        render_benchmark_workbench()
 
 
 if __name__ == "__main__":

@@ -38,6 +38,19 @@ class EquipmentToolkit:
         self.bundle = bundle
         self.report_generator = report_generator or DiagnosticReportGenerator(self.config)
 
+    def list_available_classifier_models(self) -> list[str]:
+        """返回当前已加载可用的故障分类模型列表（如 rf / cnn1d / lstm）。"""
+        return self.bundle.available_classifiers()
+
+    def get_active_classifier_model(self) -> str:
+        """返回当前激活的故障分类模型键。"""
+        return self.bundle.active_classifier_key
+
+    def set_classifier_model(self, model_key: str) -> str:
+        """动态切换设备运维智能体所使用的故障分类模型（rf / cnn1d / lstm）。"""
+        self.bundle.set_active_classifier(model_key)
+        return self.bundle.active_classifier_key
+
     # ------------------------------------------------------------------
     # OpenAI Function Calling 工具元数据定义
     # ------------------------------------------------------------------

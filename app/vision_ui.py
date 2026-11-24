@@ -25,7 +25,14 @@ from vision_agent.config import DEFECT_CLASSES, DEFECT_CN_MAP, VisionConfig, loa
 from vision_agent.decision.alert_engine import AlertEngine
 from vision_agent.decision.rag import ProcessDocRAG
 from vision_agent.memory.store import QualityMemoryStore
-from vision_agent.vision.classifier import ResNet18DefectClassifier
+from vision_agent.vision.classifier import (
+    VISION_MODEL_LABELS,
+    VISION_MODEL_REGISTRY,
+    BaseVisionDefectClassifier,
+    create_vision_classifier,
+    list_available_vision_models,
+    load_vision_classifier,
+)
 from vision_agent.vision.dataset import NEUDetCatalog
 from vision_agent.vision.yolo_detector import YOLODefectDetector
 
@@ -35,11 +42,13 @@ def _load_vision_resources(
     neu_det_dir: str,
     artifact_dir: str,
     docs_dir: str,
+    model_name: str = "resnet18",
 ):
     catalog = NEUDetCatalog(neu_det_dir)
+    cls_type = VISION_MODEL_REGISTRY.get(model_name)
     classifier = (
-        ResNet18DefectClassifier.load(artifact_dir)
-        if ResNet18DefectClassifier.exists(artifact_dir)
+        load_vision_classifier(model_name, artifact_dir)
+        if (cls_type is not None and cls_type.exists(artifact_dir))
         else None
     )
     rag = ProcessDocRAG(docs_dir)
@@ -55,6 +64,13 @@ def render_vision_sidebar(cfg: VisionConfig):
     db_path = st.sidebar.text_input("质量记忆库 (SQLite)", value=str(cfg.db_path))
     docs_dir = st.sidebar.text_input("工艺知识文档目录", value=str(cfg.process_docs_dir))
 
+    selected_model = st.sidebar.selectbox(
+        "缺陷分类模型选择",
+        options=list(VISION_MODEL_REGISTRY.keys()),
+        format_func=lambda k: VISION_MODEL_LABELS.get(k, k),
+        index=0,
+    )
+
     alert_threshold = st.sidebar.slider(
         "连续同类缺陷预警阈值（次）",
         min_value=2,
@@ -63,17 +79,23 @@ def render_vision_sidebar(cfg: VisionConfig):
         step=1,
     )
 
-    catalog, classifier, rag = _load_vision_resources(neu_dir, art_dir, docs_dir)
+    catalog, classifier, rag = _load_vision_resources(neu_dir, art_dir, docs_dir, selected_model)
     store = QualityMemoryStore(db_path)
+    ready_models = list_available_vision_models(art_dir)
 
     st.sidebar.write(f"已扫描缺陷图：**{len(catalog.samples)}** 张")
-    st.sidebar.write(f"ResNet18 模型：{'✅ 已就绪' if classifier is not None else '⚠️ 未训练'}")
+    st.sidebar.write(
+        f"当前模型（{VISION_MODEL_LABELS[selected_model]}）：{'✅ 已就绪' if classifier is not None else '⚠️ 未训练'}"
+    )
+    st.sidebar.caption(
+        f"已就绪视觉模型：{', '.join(VISION_MODEL_LABELS.get(m, m) for m in ready_models) or '无'}"
+    )
     st.sidebar.write(f"数字孪生流水：**{store.count_inspections()}** 条")
     st.sidebar.write(f"工艺文档数：**{len(rag.list_documents())}** 份（{len(rag.chunks)} 知识块）")
     yolo_flag = "✅ 已安装" if YOLODefectDetector.is_ultralytics_installed() else "可选（未安装 ultralytics）"
     st.sidebar.caption(f"YOLO 检测适配：{yolo_flag}")
 
-    epochs = st.sidebar.number_input("ResNet18 训练轮数 (Epochs)", min_value=1, max_value=30, value=4, step=1)
+    epochs = st.sidebar.number_input("模型训练轮数 (Epochs)", min_value=1, max_value=30, value=4, step=1)
 
     c1, c2 = st.sidebar.columns(2)
     with c1:
@@ -86,10 +108,20 @@ def render_vision_sidebar(cfg: VisionConfig):
             st.rerun()
 
     with c2:
-        if st.button("训练 ResNet18", use_container_width=True, disabled=not catalog.is_available):
-            with st.spinner(f"正在训练 ResNet18 迁移学习模型（{epochs} 轮）..."):
-                clf = ResNet18DefectClassifier(image_size=cfg.image_size)
-                clf.fit(catalog=catalog, epochs=int(epochs), batch_size=16, freeze_backbone=True)
+        if st.button(
+            f"训练 {VISION_MODEL_LABELS[selected_model]}",
+            use_container_width=True,
+            disabled=not catalog.is_available,
+        ):
+            with st.spinner(f"正在训练 {VISION_MODEL_LABELS[selected_model]} 迁移学习模型（{epochs} 轮）..."):
+                clf = create_vision_classifier(selected_model, image_size=cfg.image_size)
+                clf.fit(
+                    catalog=catalog,
+                    epochs=int(epochs),
+                    batch_size=16,
+                    freeze_backbone=True,
+                    split_mode="three_way",
+                )
                 clf.save(art_dir)
             st.cache_resource.clear()
             st.rerun()
@@ -122,14 +154,17 @@ def render_vision_sidebar(cfg: VisionConfig):
 def _render_upload_inspect_tab(
     toolkit: VisionToolkit,
     catalog: NEUDetCatalog,
-    classifier: ResNet18DefectClassifier | None,
+    classifier: BaseVisionDefectClassifier | None,
 ):
     st.subheader("📷 上传金属表面图像检测与数字孪生入库")
     st.caption("支持上传任意带钢表面图片或一键抽取 NEU-DET 样本，识别后自动写入 SQLite 并触发连续缺陷主动预警。")
 
     if classifier is None:
-        st.warning("尚未检测到已训练的 ResNet18 分类模型，请先点击左侧栏的 **【生成模拟缺陷图】** 和 **【训练 ResNet18】**。")
+        st.warning("当前所选视觉分类模型尚未训练，请先在左侧栏点击 **【生成模拟缺陷图】** 和 **【训练模型】**。")
         return
+
+    model_disp = VISION_MODEL_LABELS.get(classifier.ARCH_NAME, classifier.ARCH_NAME)
+    st.info(f"当前推理引擎：**{model_disp}**（可在左侧栏自由切换 ResNet18 / EfficientNet-B0）")
 
     col_cfg1, col_cfg2, col_cfg3 = st.columns(3)
     with col_cfg1:
@@ -223,7 +258,7 @@ def _render_upload_inspect_tab(
 
 def _render_dashboard_tab(
     store: QualityMemoryStore,
-    classifier: ResNet18DefectClassifier | None,
+    classifier: BaseVisionDefectClassifier | None,
 ):
     st.subheader("📊 产线质量数字孪生看板与模型评估")
 
@@ -324,11 +359,12 @@ def _render_dashboard_tab(
         rdf.columns = ["ID", "检测时间", "机台", "批次", "缺陷(中)", "缺陷(英)", "置信度", "风险", "备注"]
         st.dataframe(rdf, use_container_width=True, hide_index=True)
 
-    # ResNet18 离线评估与混淆矩阵
+    # 当前视觉模型离线评估与混淆矩阵
     if classifier is not None and classifier.metrics:
         st.markdown("---")
-        st.markdown("#### 🧪 ResNet18 视觉分类模型评估与混淆矩阵")
         m = classifier.metrics
+        model_label = VISION_MODEL_LABELS.get(m.get("model_name", classifier.ARCH_NAME), classifier.ARCH_NAME)
+        st.markdown(f"#### 🧪 {model_label} 视觉分类模型评估与混淆矩阵")
         mc1, mc2 = st.columns([1.2, 1.5])
         with mc1:
             st.write(f"- **训练时间**：`{m.get('trained_at', '-')}`")

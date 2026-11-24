@@ -354,3 +354,81 @@ class XJTUSYDataLoader:
             train_units.extend(shuffled[n_test:])
 
         return train_units, test_units
+
+
+def split_dataframe_by_time_window(
+    df: pd.DataFrame,
+    train_window: tuple[float, float] = (0.20, 0.55),
+    test_window: tuple[float, float] = (0.55, 0.70),
+    ratio_col: str = "life_ratio",
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """按全寿命周期时间窗切分训练集与测试集（对齐语雀实训参考思路）。
+
+    默认训练集取各轴承生命周期前 20%~55%，测试集取 55%~70%，
+    以检验模型从早期退化特征泛化到中后期故障阶段的能力。
+
+    Args:
+        df: 含 `life_ratio` 列的特征表。
+        train_window: 训练集生命周期比例区间 `(low, high)`（闭开区间 `[low, high)`）。
+        test_window: 测试集生命周期比例区间 `(low, high)`（闭区间 `[low, high]`）。
+        ratio_col: 生命周期比例列名，默认 `life_ratio`。
+    """
+    if df.empty or ratio_col not in df.columns:
+        return pd.DataFrame(), pd.DataFrame()
+
+    tr_low, tr_high = train_window
+    te_low, te_high = test_window
+    train_df = df[(df[ratio_col] >= tr_low) & (df[ratio_col] < tr_high)].copy().reset_index(drop=True)
+    test_df = df[(df[ratio_col] >= te_low) & (df[ratio_col] <= te_high)].copy().reset_index(drop=True)
+    return train_df, test_df
+
+
+def evaluate_predictions_over_time_bins(
+    df: pd.DataFrame,
+    y_true: np.ndarray | pd.Series,
+    y_pred: np.ndarray | pd.Series,
+    bins: list[tuple[float, float]] | None = None,
+    ratio_col: str = "life_ratio",
+) -> list[dict[str, float | int | str]]:
+    """按生命周期时间分箱评估分类准确率与 Macro-F1 随时间推移的变化趋势。"""
+    from sklearn.metrics import accuracy_score, f1_score
+
+    if bins is None:
+        bins = [
+            (0.20, 0.35),
+            (0.35, 0.50),
+            (0.50, 0.65),
+            (0.65, 0.80),
+            (0.80, 1.01),
+        ]
+
+    ratios = df[ratio_col].to_numpy(dtype=np.float64)
+    yt = np.asarray(y_true, dtype=str)
+    yp = np.asarray(y_pred, dtype=str)
+
+    results: list[dict[str, float | int | str]] = []
+    for idx, (low, high) in enumerate(bins):
+        if idx == len(bins) - 1:
+            mask = (ratios >= low) & (ratios <= high)
+            label = f"{int(round(low * 100))}%-{int(round(min(high, 1.0) * 100))}%"
+        else:
+            mask = (ratios >= low) & (ratios < high)
+            label = f"{int(round(low * 100))}%-{int(round(high * 100))}%"
+
+        count = int(np.sum(mask))
+        if count == 0:
+            continue
+        acc = float(accuracy_score(yt[mask], yp[mask]))
+        mf1 = float(f1_score(yt[mask], yp[mask], average="macro", zero_division=0))
+        results.append(
+            {
+                "bin_label": label,
+                "low": round(float(low), 3),
+                "high": round(float(min(high, 1.0)), 3),
+                "mid": round(float((low + min(high, 1.0)) / 2.0), 3),
+                "samples": count,
+                "accuracy": round(acc, 4),
+                "macro_f1": round(mf1, 4),
+            }
+        )
+    return results

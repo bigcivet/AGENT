@@ -252,6 +252,52 @@ class NEUDetCatalog:
         )
         return list(train_s), list(val_s)
 
+    def split_train_val_test(
+        self,
+        train_ratio: float = 0.70,
+        val_ratio: float = 0.15,
+        test_ratio: float = 0.15,
+        seed: int = 42,
+    ) -> tuple[list[DefectSample], list[DefectSample], list[DefectSample]]:
+        """按 70% / 15% / 15%（可配置）对全部 NEU-DET 样本执行严格分层三划分。
+
+        对齐语雀《NEU 金属表面瑕疵分类参考文档》，保证训练、验证、测试集在 6 类缺陷上
+        分布均衡且样本完全无重叠。
+        """
+        total_ratio = train_ratio + val_ratio + test_ratio
+        if abs(total_ratio - 1.0) > 1e-6:
+            raise ValueError(
+                f"train_ratio + val_ratio + test_ratio 必须等于 1.0，当前为 {total_ratio:.4f}"
+            )
+        if not self._samples:
+            return [], [], []
+
+        all_samples = list(self._samples)
+        labels = [s.label_idx for s in all_samples]
+        min_count = min(Counter(labels).values()) if labels else 0
+        holdout_ratio = val_ratio + test_ratio
+        stratify_1 = labels if min_count >= 3 else None
+
+        train_s, temp_s = train_test_split(
+            all_samples,
+            test_size=holdout_ratio,
+            random_state=seed,
+            stratify=stratify_1,
+        )
+
+        temp_labels = [s.label_idx for s in temp_s]
+        temp_min = min(Counter(temp_labels).values()) if temp_labels else 0
+        relative_test_ratio = test_ratio / max(holdout_ratio, 1e-8)
+        stratify_2 = temp_labels if temp_min >= 2 else None
+
+        val_s, test_s = train_test_split(
+            temp_s,
+            test_size=relative_test_ratio,
+            random_state=seed,
+            stratify=stratify_2,
+        )
+        return list(train_s), list(val_s), list(test_s)
+
     def export_yolo_dataset(self, output_dir: str | Path, val_ratio: float = 0.2, seed: int = 42) -> Path:
         """将带 VOC XML 标注的 NEU-DET 数据导出为 Ultralytics YOLO 格式并生成 data.yaml。"""
         out_root = Path(output_dir)
